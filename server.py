@@ -33,6 +33,20 @@ async def _serpapi_request(params: dict) -> dict:
     return response.json()
 
 
+async def _geocode_location(location: str) -> tuple[float, float] | None:
+    """Resolve a location name to GPS coordinates using SerpAPI locations endpoint."""
+    response = await http_client.get(
+        "https://serpapi.com/locations.json",
+        params={"q": location, "limit": 1},
+    )
+    results = response.json()
+    if results:
+        gps = results[0].get("gps")
+        if gps:
+            return gps[1], gps[0]  # SerpAPI returns [lng, lat], we need (lat, lng)
+    return None
+
+
 @mcp.tool
 async def search_google_maps(
     query: str,
@@ -41,19 +55,17 @@ async def search_google_maps(
     longitude: Optional[float] = None,
     zoom: int = 14,
     language: str = "en",
-    country: Optional[str] = None,
     start: int = 0,
 ) -> dict:
     """Search Google Maps for businesses and places.
 
     Args:
         query: Search query (e.g. "pizza", "dentist", "hotels")
-        location: Named location (e.g. "New York, NY", "London, UK")
-        latitude: GPS latitude for coordinate-based search
-        longitude: GPS longitude for coordinate-based search
+        location: Named location (e.g. "New York, NY", "Rabat, Morocco"). Auto-geocoded to coordinates.
+        latitude: GPS latitude for coordinate-based search (overrides location)
+        longitude: GPS longitude for coordinate-based search (overrides location)
         zoom: Map zoom level 3-30 (default 14)
         language: Language code (default "en")
-        country: Country code for localized results (e.g. "us", "uk")
         start: Pagination offset (increment by 20 for next page)
     """
     params = {"engine": "google_maps", "q": query, "hl": language, "start": start}
@@ -61,17 +73,16 @@ async def search_google_maps(
     if latitude is not None and longitude is not None:
         params["ll"] = f"@{latitude},{longitude},{zoom}z"
     elif location:
-        params["location"] = location
-
-    if country:
-        params["gl"] = country
+        coords = await _geocode_location(location)
+        if coords:
+            params["ll"] = f"@{coords[0]},{coords[1]},{zoom}z"
 
     data = await _serpapi_request(params)
 
     results = data.get("local_results", [])
     return {
         "query": query,
-        "location": location or f"@{latitude},{longitude}" if latitude else None,
+        "location": location or (f"@{latitude},{longitude}" if latitude else None),
         "total_results": len(results),
         "results": results,
         "has_next_page": "serpapi_pagination" in data,
@@ -309,7 +320,6 @@ async def search_and_bulk_review(
     max_reviews_per_place: int = 100,
     sort_by: str = "newestFirst",
     language: str = "en",
-    country: Optional[str] = None,
 ) -> dict:
     """Search for places and fetch reviews for ALL matching results concurrently.
 
@@ -324,7 +334,6 @@ async def search_and_bulk_review(
         max_reviews_per_place: Max reviews per place (default 100, max 100)
         sort_by: Sort order - "qualityScore", "newestFirst", "ratingHigh", "ratingLow"
         language: Language code (default "en")
-        country: Country code for localized results (e.g. "us", "uk")
     """
     search_result = await search_google_maps(
         query=query,
@@ -332,7 +341,6 @@ async def search_and_bulk_review(
         latitude=latitude,
         longitude=longitude,
         language=language,
-        country=country,
     )
 
     places = search_result.get("results", [])
