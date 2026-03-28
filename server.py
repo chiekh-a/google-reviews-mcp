@@ -1,3 +1,4 @@
+import asyncio
 import os
 from typing import Optional
 
@@ -252,6 +253,110 @@ async def search_and_review(
     return {
         "place": top_place,
         "reviews": reviews_data,
+    }
+
+
+@mcp.tool
+async def bulk_fetch_reviews(
+    place_ids: list[str],
+    max_reviews_per_place: int = 100,
+    sort_by: str = "newestFirst",
+    language: str = "en",
+) -> dict:
+    """Fetch reviews for multiple places concurrently.
+
+    Runs all locations in parallel, each auto-paginating up to max_reviews_per_place.
+    Individual failures don't crash the batch — partial results are returned.
+
+    Args:
+        place_ids: List of Google Maps place_id strings
+        max_reviews_per_place: Max reviews per place (default 100, max 100)
+        sort_by: Sort order - "qualityScore", "newestFirst", "ratingHigh", "ratingLow"
+        language: Language code (default "en")
+    """
+
+    async def _fetch_one(pid: str) -> dict:
+        try:
+            return await _fetch_reviews_auto_paginate(
+                place_id=pid,
+                max_reviews=max_reviews_per_place,
+                sort_by=sort_by,
+                language=language,
+            )
+        except Exception as e:
+            return {"error": str(e), "place_id": pid}
+
+    results = await asyncio.gather(*[_fetch_one(pid) for pid in place_ids])
+
+    return {
+        "total_places": len(place_ids),
+        "results": {pid: result for pid, result in zip(place_ids, results)},
+    }
+
+
+@mcp.tool
+async def search_and_bulk_review(
+    query: str,
+    location: Optional[str] = None,
+    latitude: Optional[float] = None,
+    longitude: Optional[float] = None,
+    max_reviews_per_place: int = 100,
+    sort_by: str = "newestFirst",
+    language: str = "en",
+    country: Optional[str] = None,
+) -> dict:
+    """Search for places and fetch reviews for ALL matching results concurrently.
+
+    Combines search + bulk review in one call. Useful for monitoring all businesses
+    matching a query in a region.
+
+    Args:
+        query: Search query (e.g. "pizza", "dentist")
+        location: Named location (e.g. "New York, NY")
+        latitude: GPS latitude for coordinate-based search
+        longitude: GPS longitude for coordinate-based search
+        max_reviews_per_place: Max reviews per place (default 100, max 100)
+        sort_by: Sort order - "qualityScore", "newestFirst", "ratingHigh", "ratingLow"
+        language: Language code (default "en")
+        country: Country code for localized results (e.g. "us", "uk")
+    """
+    search_result = await search_google_maps(
+        query=query,
+        location=location,
+        latitude=latitude,
+        longitude=longitude,
+        language=language,
+        country=country,
+    )
+
+    places = search_result.get("results", [])
+    if not places:
+        return {"error": f"No places found for query '{query}'", "results": {}}
+
+    place_ids = [p["place_id"] for p in places if p.get("place_id")]
+    if not place_ids:
+        return {"error": "No place_ids found in search results", "places": places}
+
+    reviews_result = await bulk_fetch_reviews(
+        place_ids=place_ids,
+        max_reviews_per_place=max_reviews_per_place,
+        sort_by=sort_by,
+        language=language,
+    )
+
+    # Merge place info with reviews
+    place_lookup = {p.get("place_id"): p for p in places if p.get("place_id")}
+    enriched = {}
+    for pid, review_data in reviews_result["results"].items():
+        enriched[pid] = {
+            "place": place_lookup.get(pid, {}),
+            "reviews": review_data,
+        }
+
+    return {
+        "query": query,
+        "total_places": len(place_ids),
+        "results": enriched,
     }
 
 
