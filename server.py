@@ -1,5 +1,6 @@
 import asyncio
 import os
+from datetime import datetime, timezone
 from typing import Optional
 
 import httpx
@@ -142,6 +143,18 @@ async def _fetch_reviews_page(
     return await _serpapi_request(params)
 
 
+def _parse_review_date(review: dict) -> datetime | None:
+    """Try to parse a review's date from iso_date or iso_date_of_last_edit."""
+    for key in ("iso_date_of_last_edit", "iso_date"):
+        val = review.get(key)
+        if val:
+            try:
+                return datetime.fromisoformat(val.replace("Z", "+00:00"))
+            except ValueError:
+                continue
+    return None
+
+
 async def _fetch_reviews_auto_paginate(
     place_id: str,
     max_reviews: int = 20,
@@ -149,13 +162,25 @@ async def _fetch_reviews_auto_paginate(
     language: str = "en",
     topic_id: Optional[str] = None,
     query: Optional[str] = None,
+    since_date: Optional[str] = None,
 ) -> dict:
-    """Fetch reviews with auto-pagination up to max_reviews (max 100)."""
+    """Fetch reviews with auto-pagination up to max_reviews (max 100).
+
+    If since_date is provided, forces sort_by="newestFirst" and stops
+    fetching once reviews older than that date are encountered.
+    """
     max_reviews = min(max_reviews, 100)
+    if since_date:
+        sort_by = "newestFirst"
+        cutoff = datetime.fromisoformat(since_date).replace(tzinfo=timezone.utc)
+    else:
+        cutoff = None
+
     all_reviews = []
     place_info = None
     topics = None
     next_token = None
+    hit_cutoff = False
 
     while len(all_reviews) < max_reviews:
         remaining = max_reviews - len(all_reviews)
@@ -180,7 +205,16 @@ async def _fetch_reviews_auto_paginate(
         if not reviews:
             break
 
-        all_reviews.extend(reviews)
+        for review in reviews:
+            if cutoff:
+                review_dt = _parse_review_date(review)
+                if review_dt and review_dt < cutoff:
+                    hit_cutoff = True
+                    break
+            all_reviews.append(review)
+
+        if hit_cutoff:
+            break
 
         pagination = data.get("serpapi_pagination", {})
         next_token = pagination.get("next_page_token")
@@ -203,6 +237,7 @@ async def get_place_reviews(
     language: str = "en",
     topic_id: Optional[str] = None,
     query: Optional[str] = None,
+    since_date: Optional[str] = None,
 ) -> dict:
     """Get reviews for a specific place on Google Maps with auto-pagination.
 
@@ -213,6 +248,7 @@ async def get_place_reviews(
         language: Language code (default "en")
         topic_id: Filter reviews by topic ID
         query: Filter reviews by text search
+        since_date: Only return reviews after this date (ISO format, e.g. "2026-03-14"). Automatically sorts by newest first.
     """
     return await _fetch_reviews_auto_paginate(
         place_id=place_id,
@@ -221,6 +257,7 @@ async def get_place_reviews(
         language=language,
         topic_id=topic_id,
         query=query,
+        since_date=since_date,
     )
 
 
@@ -233,6 +270,7 @@ async def search_and_review(
     max_reviews: int = 20,
     sort_by: str = "qualityScore",
     language: str = "en",
+    since_date: Optional[str] = None,
 ) -> dict:
     """Search for a place by name and location, then fetch its reviews in one call.
 
@@ -246,6 +284,7 @@ async def search_and_review(
         max_reviews: Maximum number of reviews to fetch (default 20, max 100)
         sort_by: Sort order - "qualityScore", "newestFirst", "ratingHigh", "ratingLow"
         language: Language code (default "en")
+        since_date: Only return reviews after this date (ISO format, e.g. "2026-03-14"). Automatically sorts by newest first.
     """
     search_result = await search_google_maps(
         query=query,
@@ -269,6 +308,7 @@ async def search_and_review(
         max_reviews=max_reviews,
         sort_by=sort_by,
         language=language,
+        since_date=since_date,
     )
 
     return {
@@ -283,6 +323,7 @@ async def bulk_fetch_reviews(
     max_reviews_per_place: int = 100,
     sort_by: str = "newestFirst",
     language: str = "en",
+    since_date: Optional[str] = None,
 ) -> dict:
     """Fetch reviews for multiple places concurrently.
 
@@ -294,6 +335,7 @@ async def bulk_fetch_reviews(
         max_reviews_per_place: Max reviews per place (default 100, max 100)
         sort_by: Sort order - "qualityScore", "newestFirst", "ratingHigh", "ratingLow"
         language: Language code (default "en")
+        since_date: Only return reviews after this date (ISO format, e.g. "2026-03-14"). Automatically sorts by newest first.
     """
 
     async def _fetch_one(pid: str) -> dict:
@@ -303,6 +345,7 @@ async def bulk_fetch_reviews(
                 max_reviews=max_reviews_per_place,
                 sort_by=sort_by,
                 language=language,
+                since_date=since_date,
             )
         except Exception as e:
             return {"error": str(e), "place_id": pid}
@@ -324,6 +367,7 @@ async def search_and_bulk_review(
     max_reviews_per_place: int = 100,
     sort_by: str = "newestFirst",
     language: str = "en",
+    since_date: Optional[str] = None,
 ) -> dict:
     """Search for places and fetch reviews for ALL matching results concurrently.
 
@@ -338,6 +382,7 @@ async def search_and_bulk_review(
         max_reviews_per_place: Max reviews per place (default 100, max 100)
         sort_by: Sort order - "qualityScore", "newestFirst", "ratingHigh", "ratingLow"
         language: Language code (default "en")
+        since_date: Only return reviews after this date (ISO format, e.g. "2026-03-14"). Automatically sorts by newest first.
     """
     search_result = await search_google_maps(
         query=query,
@@ -360,6 +405,7 @@ async def search_and_bulk_review(
         max_reviews_per_place=max_reviews_per_place,
         sort_by=sort_by,
         language=language,
+        since_date=since_date,
     )
 
     # Merge place info with reviews
