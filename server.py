@@ -5,6 +5,7 @@ from typing import Optional
 import httpx
 from dotenv import load_dotenv
 from fastmcp import FastMCP
+from starlette.responses import JSONResponse
 
 load_dotenv()
 
@@ -14,6 +15,11 @@ SERPAPI_KEY = os.environ.get("SERPER_API_KEY", "")
 mcp = FastMCP("Google Maps Reviews")
 
 http_client = httpx.AsyncClient(timeout=30.0)
+
+
+@mcp.custom_route("/health", methods=["GET"])
+async def health(request):
+    return JSONResponse({"status": "ok"})
 
 
 async def _serpapi_request(params: dict) -> dict:
