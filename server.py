@@ -127,14 +127,18 @@ async def _fetch_reviews_page(
         "place_id": place_id,
         "sort_by": sort_by,
         "hl": language,
-        "num": num,
     }
+    # SerpAPI: `num` must NOT be sent on the first page unless
+    # next_page_token, topic_id, or query is also set.
     if next_page_token:
         params["next_page_token"] = next_page_token
+        params["num"] = num
     if topic_id:
         params["topic_id"] = topic_id
+        params["num"] = num
     if query:
         params["query"] = query
+        params["num"] = num
     return await _serpapi_request(params)
 
 
@@ -203,7 +207,7 @@ async def get_place_reviews(
     """Get reviews for a specific place on Google Maps with auto-pagination.
 
     Args:
-        place_id: The Google Maps place_id (from search results)
+        place_id: The Google Maps place_id (e.g. "ChIJ...") from search results
         max_reviews: Maximum number of reviews to fetch (default 20, max 100)
         sort_by: Sort order - "qualityScore", "newestFirst", "ratingHigh", "ratingLow"
         language: Language code (default "en")
@@ -286,7 +290,7 @@ async def bulk_fetch_reviews(
     Individual failures don't crash the batch — partial results are returned.
 
     Args:
-        place_ids: List of Google Maps place_id strings
+        place_ids: List of Google Maps place_id strings (e.g. "ChIJ...") from search results
         max_reviews_per_place: Max reviews per place (default 100, max 100)
         sort_by: Sort order - "qualityScore", "newestFirst", "ratingHigh", "ratingLow"
         language: Language code (default "en")
