@@ -94,6 +94,167 @@ async def get_place_details(
     return place_results
 
 
+async def _fetch_reviews_page(
+    place_id: str,
+    sort_by: str = "qualityScore",
+    language: str = "en",
+    num: int = 20,
+    next_page_token: Optional[str] = None,
+    topic_id: Optional[str] = None,
+    query: Optional[str] = None,
+) -> dict:
+    """Fetch a single page of reviews for a place."""
+    params = {
+        "engine": "google_maps_reviews",
+        "place_id": place_id,
+        "sort_by": sort_by,
+        "hl": language,
+        "num": num,
+    }
+    if next_page_token:
+        params["next_page_token"] = next_page_token
+    if topic_id:
+        params["topic_id"] = topic_id
+    if query:
+        params["query"] = query
+    return await _serpapi_request(params)
+
+
+async def _fetch_reviews_auto_paginate(
+    place_id: str,
+    max_reviews: int = 20,
+    sort_by: str = "qualityScore",
+    language: str = "en",
+    topic_id: Optional[str] = None,
+    query: Optional[str] = None,
+) -> dict:
+    """Fetch reviews with auto-pagination up to max_reviews (max 100)."""
+    max_reviews = min(max_reviews, 100)
+    all_reviews = []
+    place_info = None
+    topics = None
+    next_token = None
+
+    while len(all_reviews) < max_reviews:
+        remaining = max_reviews - len(all_reviews)
+        page_size = min(remaining, 20)
+
+        data = await _fetch_reviews_page(
+            place_id=place_id,
+            sort_by=sort_by,
+            language=language,
+            num=page_size,
+            next_page_token=next_token,
+            topic_id=topic_id,
+            query=query,
+        )
+
+        if place_info is None:
+            place_info = data.get("place_info", {})
+        if topics is None:
+            topics = data.get("topics", [])
+
+        reviews = data.get("reviews", [])
+        if not reviews:
+            break
+
+        all_reviews.extend(reviews)
+
+        pagination = data.get("serpapi_pagination", {})
+        next_token = pagination.get("next_page_token")
+        if not next_token:
+            break
+
+    return {
+        "place_info": place_info,
+        "topics": topics,
+        "reviews": all_reviews[:max_reviews],
+        "total_fetched": len(all_reviews[:max_reviews]),
+    }
+
+
+@mcp.tool
+async def get_place_reviews(
+    place_id: str,
+    max_reviews: int = 20,
+    sort_by: str = "qualityScore",
+    language: str = "en",
+    topic_id: Optional[str] = None,
+    query: Optional[str] = None,
+) -> dict:
+    """Get reviews for a specific place on Google Maps with auto-pagination.
+
+    Args:
+        place_id: The Google Maps place_id (from search results)
+        max_reviews: Maximum number of reviews to fetch (default 20, max 100)
+        sort_by: Sort order - "qualityScore", "newestFirst", "ratingHigh", "ratingLow"
+        language: Language code (default "en")
+        topic_id: Filter reviews by topic ID
+        query: Filter reviews by text search
+    """
+    return await _fetch_reviews_auto_paginate(
+        place_id=place_id,
+        max_reviews=max_reviews,
+        sort_by=sort_by,
+        language=language,
+        topic_id=topic_id,
+        query=query,
+    )
+
+
+@mcp.tool
+async def search_and_review(
+    query: str,
+    location: Optional[str] = None,
+    latitude: Optional[float] = None,
+    longitude: Optional[float] = None,
+    max_reviews: int = 20,
+    sort_by: str = "qualityScore",
+    language: str = "en",
+) -> dict:
+    """Search for a place by name and location, then fetch its reviews in one call.
+
+    Finds the top matching place and returns its reviews.
+
+    Args:
+        query: Business name or search query (e.g. "Starbucks Times Square")
+        location: Named location (e.g. "New York, NY")
+        latitude: GPS latitude for coordinate-based search
+        longitude: GPS longitude for coordinate-based search
+        max_reviews: Maximum number of reviews to fetch (default 20, max 100)
+        sort_by: Sort order - "qualityScore", "newestFirst", "ratingHigh", "ratingLow"
+        language: Language code (default "en")
+    """
+    search_result = await search_google_maps(
+        query=query,
+        location=location,
+        latitude=latitude,
+        longitude=longitude,
+        language=language,
+    )
+
+    results = search_result.get("results", [])
+    if not results:
+        return {"error": f"No places found for query '{query}'", "results": []}
+
+    top_place = results[0]
+    pid = top_place.get("place_id")
+    if not pid:
+        return {"error": "Top result has no place_id", "place": top_place}
+
+    reviews_data = await _fetch_reviews_auto_paginate(
+        place_id=pid,
+        max_reviews=max_reviews,
+        sort_by=sort_by,
+        language=language,
+    )
+
+    return {
+        "place": top_place,
+        "reviews": reviews_data,
+    }
+
+
 if __name__ == "__main__":
     port = int(os.environ.get("PORT", 8000))
     mcp.run(transport="streamable-http", host="0.0.0.0", port=port)
